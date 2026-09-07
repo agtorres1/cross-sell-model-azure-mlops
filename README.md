@@ -1,118 +1,175 @@
 # Predicción de propensión a nuevo producto (cross-sell) con Azure MLOps
 
-Modelo que predice qué clientes bancarios tienen mayor probabilidad de sumar un nuevo producto (tarjeta, préstamo, caja de ahorro, etc.), desarrollado con metodología **KDD** y llevado a producción end-to-end con **Azure Machine Learning**.
-
-> **Nota sobre el target:** el análisis exploratorio inicial mostró que los clientes con `Target=1` tienen más productos activos, más actividad transaccional y contrataron su último producto más recientemente que los de `Target=0` — el patrón opuesto al de una fuga. Esto descarta la hipótesis inicial de *churn* y confirma que `Target` mide **propensión de compra / engagement**, no abandono. Esta validación temprana condicionó tanto el diseño de la ABT (Parte 1) como el enfoque de negocio del despliegue (Parte 2): el modelo no se usa para retener, sino para **priorizar a quién ofrecerle qué producto**.
+Modelo supervisado de Machine Learning para predecir qué clientes bancarios tienen mayor probabilidad de contratar un nuevo paquete de productos (cross-selling), desarrollado bajo la metodología **KDD** (Knowledge Discovery in Databases) y diseñado para su productivización end-to-end con **Azure Machine Learning**.
 
 ---
 
-## Estructura del repo
+## 📌 Nota sobre la Definición del Target
+
+El análisis exploratorio inicial evidenció que los clientes con `Target = 1` presentan mayor cantidad de productos activos, mayor volumen transaccional y mayor actividad reciente en comparación con los clientes con `Target = 0`. Este comportamiento descarta la hipótesis de fuga (*churn*) y valida que el target mide **propensión de compra / engagement**, no abandono.
+
+Esta validación temprana condicionó directamente:
+
+1. **El diseño de la ABT (Parte 1):** Foco en variables de adopción, transaccionalidad, saldos y uso de canales.
+2. **El enfoque de despliegue (Parte 2):** Priorización de colas de contacto comercial (Call Center, campañas dirigidas y notificaciones en Mobile App) y no retención.
+
+---
+
+## 📂 Estructura del Repositorio
+
+```text
+├── data/           # Datasets raw, intermedios y tablas analíticas (ABT)
+├── notebooks/      # Flujo modular de Experimentación y Modelado (KDD - 4 etapas)
+│   ├── 01_eda_y_definicion_universo.ipynb
+│   ├── 02_construccion_abt.ipynb
+│   ├── 03_entrenamiento_modelos.ipynb
+│   └── 04_evaluacion_metricas_negocio.ipynb
+├── src/            # Funciones productivas reutilizables (limpieza, features, scoring)
+├── azure/          # Componentes de Azure ML (pipelines SDK v2, endpoints, monitoreo)
+├── models/         # Model Registry y serialización (.pkl / MLflow)
+└── docs/           # Diccionario de datos, reportes y decisiones de arquitectura
+```
+
+> **Principio de diseño:** lo explorado y validado en `notebooks/` se traslada como código reutilizable a `src/`, y ese mismo código es el que ejecutan los componentes del pipeline en `azure/`. No hay lógica duplicada entre experimentación y productivización.
+
+---
+
+## 🔬 Parte 1 — Modelado (Metodología KDD)
+
+Aplicada sobre el dataset histórico de clientes bancarios (`client_id`, transacciones, saldos de cuentas, tenencia de productos y uso de canales), siguiendo las fases clásicas de KDD:
+
+### 1. Objetivo y Definición del Universo (Selection & Business Understanding)
+
+**Objetivo de Negocio:** estimar la probabilidad de que un cliente adquiera un paquete bancario para optimizar la tasa de conversión en campañas de marketing y colas de atención.
+
+**Ventana Temporal (9 meses en total):**
+
+- **Training / Historical Window (6 meses):** período de observación histórica para generar variables explicativas.
+- **Lead Window (1 mes):** brecha operativa requerida por el negocio (ejecución del scoring, armado de listas y contacto) para evitar data leakage.
+- **Prediction Window (2 meses):** ventana de desempeño donde se observa si ocurre la compra.
+
+**Filtros del Universo:**
+
+- Clientes con al menos 9 meses continuos de historial en la base.
+- Exclusión de clientes que ya posean el paquete activo en o antes del mes 6 (punto de corte).
+
+**Definición del Target (Y):**
 
 ```
-data/           datasets originales y procesados
-notebooks/      exploración, limpieza y modelado (KDD)
-src/            funciones reutilizables (limpieza, features, scoring)
-azure/          assets de Azure ML: pipeline de entrenamiento, endpoint, monitoreo
-models/         artefactos o referencia al Model Registry de Azure ML
-docs/           métricas, decisiones tomadas y diagramas de arquitectura
+Y = 1  si el cliente adquiere el paquete en la ventana de predicción (meses 8 o 9)
+Y = 0  en caso contrario
 ```
 
-El repo está pensado como un único flujo: lo que se explora y valida en `notebooks/` se traslada como código reutilizable a `src/`, y ese mismo código es el que corre dentro de los componentes del pipeline en `azure/`. No hay lógica duplicada entre el notebook y la productivización.
+**Estrategia ante Desbalance:** evaluación de balanceo mediante `class_weight='balanced'`, técnicas de undersampling controlado y calibración del umbral de decisión (*threshold tuning*) según el punto de corte óptimo de negocio.
+
+### 2. Limpieza y Calidad de Datos (Preprocessing)
+
+**Valores Faltantes (Missing Values):**
+
+- *Numéricos:* imputación con 0 cuando refleja ausencia de transacciones/saldo; imputación con la mediana (o media) cuando el cero distorsiona la distribución.
+- *Categóricos:* imputación mediante categoría explícita `'NO DATA'` / `'DESCONOCIDO'`.
+
+**Outliers:** detección y tratamiento mediante rango intercuartílico (IQR / Boxplot) y técnica de corte a 3σ (o percentiles 1% y 99%).
+
+**Codificación:** Target Encoding para variables de alta cardinalidad y One-Hot Encoding para categorías nominales de baja cardinalidad.
+
+### 3. Construcción de la ABT (Transformation & Feature Engineering)
+
+Consolidación de la Analytic Base Table a nivel `client_id` al corte del mes 6:
+
+- **Identity Features:** atributos directos del cliente (edad, antigüedad, ingresos declarados).
+- **Transform Features:** variables derivadas con lógica de negocio (tramos etarios, cantidad total de productos activos, flags binarios de tenencia).
+- **Aggregate Features (Metodología de las 16 features por variable numérica):**
+
+  Para cada métrica transaccional y de saldo (caja de ahorro, movimientos, etc.), cálculo de 8 estadísticos en 2 horizontes temporales (últimos 3 meses y últimos 6 meses):
+
+  - Mínimo (`min`)
+  - Máximo (`max`)
+  - Promedio (`mean`)
+  - Mediana (`median`)
+  - Suma (`sum`)
+  - Conteo de actividad distinta de cero (`non_cero`)
+  - Varianza / Dispersión (`var`)
+  - Variación relativa entre primer y último mes del período
+
+### 4. Selección de Variables
+
+- Eliminación de features con varianza cero o valores constantes.
+- Análisis de multicolinealidad vía matriz de correlación.
+- Reducción de dimensionalidad (PCA con estandarización previa vía `StandardScaler`) y ranking de importancia de variables mediante modelos basados en árboles (Random Forest / LightGBM) como primer filtro de selección.
+
+### 5. Algoritmos y Entrenamiento (Data Mining)
+
+**Partición de Datos:** split estratificado Train / Validation / Test mediante Stratified K-Fold Cross Validation para preservar la proporción del target.
+
+**Modelos Evaluados:**
+
+- Regresión Logística (baseline lineal e interpretable)
+- Árbol de Decisión (CART)
+- Random Forest Classifier (ensamble por bagging)
+- LightGBM (Gradient Boosting optimizado para datos tabulares y alta performance)
+
+**Optimización de Hiperparámetros:** búsqueda combinada con `RandomizedSearchCV` (exploración amplia del espacio) y `GridSearchCV` (afinado fino del mejor modelo).
+
+### 6. Evaluación de Negocio e Interpretación (Evaluation)
+
+**Métricas Técnicas:** curva ROC, AUC-ROC y matriz de confusión ajustada al umbral de contacto óptimo.
+
+**Métricas de Negocio y Ranking:**
+
+- **Curva Lift y Ganancia Acumulada:** evaluación del factor de enriquecimiento en los primeros deciles (top 10%, 20%, 30%).
+- **Estadístico KS (Kolmogorov-Smirnov):** verificación de la máxima separación entre compradores y no compradores.
+- **Tabla de Deciles:** validación del ordenamiento decreciente estricto y consistencia de performance entre Train y Test para descartar sobreajuste (overfitting).
+
+**Estabilidad y Recalibración:** chequeo de estabilidad poblacional (PSI) y establecimiento de criterios de recalibración (caída de AUC/KS en nuevos meses, pérdida de importancia de variables, cambios en políticas comerciales).
+
+**📓 Notebooks de trabajo:**
+
+- [`notebooks/01_eda_y_definicion_universo.ipynb`](notebooks/01_eda_y_definicion_universo.ipynb)
+- [`notebooks/02_construccion_abt.ipynb`](notebooks/02_construccion_abt.ipynb)
+- [`notebooks/03_entrenamiento_modelos.ipynb`](notebooks/03_entrenamiento_modelos.ipynb)
+- [`notebooks/04_evaluacion_metricas_negocio.ipynb`](notebooks/04_evaluacion_metricas_negocio.ipynb)
 
 ---
 
-## Parte 1 — Modelado (metodología KDD)
-
-Aplicada sobre un dataset de clientes bancarios (`client_id`, `Target`, productos activos, balances, transacciones, uso de canales), siguiendo las etapas clásicas de KDD/CRISP-DM: selección → preprocesamiento → transformación → data mining → interpretación.
-
-### 1. Objetivo y universo (Business Understanding)
-Predecir la probabilidad de que un cliente adopte un **nuevo** producto en el corto plazo, en base a su comportamiento transaccional y tenencia actual de productos.
-
-- **Ventana temporal:** *(completar)* — training window / lead window / prediction window definidas, ej. 6 meses de histórico + 1 mes de lead + 2 meses de predicción.
-- **Filtros del universo:** *(completar)* — antigüedad mínima del cliente, exclusión de clientes con el producto objetivo ya activo, exclusión de altas/bajas dentro de la ventana, etc.
-- **Balance del target:** proporción de `Target=1` vs `Target=0` y estrategia de balanceo si aplica (undersampling, class weights).
-
-### 2. Limpieza y calidad de datos
-Nulos (imputación según tipo de variable — cero vs mediana vs categoría "sin dato"), duplicados, outliers (percentiles / 3-sigma), tratamiento de variables categóricas de alta cardinalidad (encoding basado en target vs one-hot).
-
-### 3. ABT (Analytical Base Table)
-Construcción de la tabla analítica a nivel `client_id`, combinando:
-- **Identity features:** variables tomadas directamente de la base (edad, antigüedad, cantidad de productos activos).
-- **Transform features:** variables derivadas con lógica de negocio (grupos etarios, flags binarios, ratios).
-- **Aggregate features:** estadísticos por ventanas de tiempo (mínimo, promedio, máximo, mediana, suma, variación entre primer y último mes) sobre transacciones y balances.
-
-### 4. Selección de variables
-Eliminación de features sin varianza o con valores únicos, matriz de correlación, reducción de dimensionalidad (PCA) y selección basada en importancia de un modelo genérico (Random Forest / LightGBM) como primer filtro.
-
-### 5. Algoritmo
-*(completar: regresión logística, árbol, Random Forest, LightGBM, etc. y justificación — interpretabilidad vs performance, tiempo de entrenamiento, necesidad de explicabilidad para negocio)*
-
-### 6. Validación
-Train / test / validación, k-fold (o stratified k-fold dado el desbalance del target), búsqueda de hiperparámetros (Grid Search / Randomized Search).
-
-### 7. Evaluación
-Matriz de confusión con threshold ajustado (no el 0.5 por defecto), AUC-ROC, KS, análisis por deciles (lift), y comparación de performance entre train y test para descartar overfitting. Se documenta también un chequeo de **estabilidad temporal** de las variables principales, para anticipar necesidad de recalibración.
-
-📓 Ver `notebooks/01_objetivo_y_universo.ipynb`, `02_limpieza_y_abt.ipynb`, `03_modelado_y_evaluacion.ipynb`
-
----
-
-## Parte 2 — Productivización con Azure MLOps
-
-El modelo entrenado en la Parte 1 se lleva a producción para alimentar, por ejemplo, campañas de marketing dirigidas a los clientes con mayor score de propensión.
-
-### Arquitectura general
+## 🚀 Parte 2 — Productivización con Azure MLOps
 
 ```
 data/ (raw)
    │
    ▼
-Azure ML Datastore + Data Asset  ──────────────►  versionado y trazabilidad del dataset
+Azure ML Datastore + Data Asset  ──────────────►  Versionado y linaje del dataset
    │
    ▼
-Azure ML Pipeline (entrenamiento)
-   ├─ componente: preprocesamiento / ABT   (reutiliza src/)
-   ├─ componente: entrenamiento + tuning
-   └─ componente: evaluación y registro condicional
+Azure ML Pipeline (Entrenamiento)
+   ├─ Componente: Preprocesamiento / ABT   (reutiliza src/features.py)
+   ├─ Componente: Entrenamiento + Tuning   (reutiliza src/train.py)
+   └─ Componente: Evaluación y Quality Gate
    │
    ▼
-Model Registry (Azure ML)  ─────────────────────►  versión, métricas y linaje del modelo
+Model Registry (Azure ML)  ─────────────────────►  Artefacto, métricas y parámetros (MLflow)
    │
    ▼
-Managed Online Endpoint  ───────────────────────►  scoring en tiempo real / batch
+Managed Online / Batch Endpoint ────────────────►  Scoring para campañas de cross-sell
    │
    ▼
-Monitoreo (data drift + performance)  ──────────►  alertas y disparo de reentrenamiento
+Monitoreo MLOps (Data Drift & Performance) ─────►  Alertas y trigger de reentrenamiento
 ```
 
-### 1. Registro de dataset y experimento
-- Carga del dataset procesado como **Data Asset** versionado en Azure ML (`azureml:cross_sell_abt:1`).
-- Experimento de entrenamiento trackeado con **MLflow** (nativo en Azure ML): parámetros, métricas (AUC, KS, lift por decil) y artefactos de cada corrida.
-
-### 2. Pipeline de entrenamiento
-Pipeline declarativo (YAML + Azure ML SDK v2) que reutiliza el mismo código de `src/` usado en los notebooks, evitando duplicar lógica entre exploración y producción:
-- Componente de preprocesamiento / armado de ABT.
-- Componente de entrenamiento y búsqueda de hiperparámetros.
-- Componente de evaluación, con **gate de calidad**: el modelo solo se registra si supera un umbral mínimo de AUC/KS respecto al modelo actualmente en producción.
-
-### 3. Registro del modelo
-Registro versionado en el **Model Registry** de Azure ML, con metadata asociada: métricas de evaluación, features utilizadas, ventana temporal de entrenamiento y referencia al experimento/commit que lo generó.
-
-### 4. Despliegue como endpoint de inferencia
-- **Managed Online Endpoint** para scoring on-demand (batch scoring diario/semanal contra la cartera de clientes para nutrir campañas).
-- Script de scoring (`azure/endpoint/`) que aplica el mismo pipeline de features que en entrenamiento, para evitar *training-serving skew*.
-
-### 5. Monitoreo de drift y degradación del modelo
-- **Data drift** sobre las variables de entrada (comparando distribución de scoring vs. training).
-- **Degradación de performance** en el tiempo: seguimiento de AUC/KS sobre cohortes con label ya conocido, y de la estabilidad del %target por decil (ver criterios de recalibración de la Parte 1).
-- Criterios de recalibración: caída sostenida de performance, features que pierden importancia, cambios en la definición de negocio del producto ofrecido.
-
-📁 Ver `azure/pipeline/`, `azure/endpoint/`
+- **Registro de Dataset y Tracking:** carga del dataset como Data Asset versionado en Azure ML Datastore y seguimiento de corridas con MLflow integrado (métricas, parámetros y artefactos).
+- **Pipeline Declarativo:** construcción mediante Azure ML SDK v2 / YAML vinculando los componentes de `src/` sin duplicar código.
+- **Quality Gate:** registro condicional en el Model Registry solo si el modelo candidato supera el umbral de AUC y KS del modelo en producción.
+- **Endpoint de Inferencia:** Managed Online / Batch Endpoint para scoring periódico sobre la cartera de clientes, aplicando las mismas transformaciones para evitar *training-serving skew*.
+- **Monitoreo Continuo:** detección de data drift en variables de entrada y degradación de performance en el tiempo para disparar reentrenamientos automatizados.
 
 ---
 
-## Resultados
-*(completar: AUC final, KS, lift en el primer decil, tamaño de la campaña recomendada, comparación train vs test)*
+## 📊 Resultados
 
-## Próximos pasos
-*(completar: automatización de reentrenamiento periódico, incorporación de nuevas fuentes de datos, A/B testing de la campaña generada con el modelo)*
+| Métrica | Valor |
+|---|---|
+| AUC-ROC Final | *(a completar con corrida final)* |
+| Estadístico KS | *(a completar con corrida final)* |
+| Lift en 1er Decil | *(a completar con corrida final)* |
+
+**Recomendación Comercial:** focalización de la campaña en los deciles de mayor propensión para maximizar el ROI del canal de contacto.
