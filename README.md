@@ -58,7 +58,7 @@ mes:  1    2    3    4    5    6  |  7  |  8    9
 | Universo y target | `01_universo_y_target` | ✅ |
 | Limpieza: nulos y outliers | `02_limpieza` | ✅ |
 | Construcción de la ABT | `03_abt` | ✅ |
-| Reducción de dimensionalidad | `04_seleccion_variables` | 🟡 En curso |
+| Selección de variables | `04_seleccion` | ✅ |
 | Entrenamiento de modelos | `05_entrenamiento_modelos` | ⏳ |
 | Evaluación con métricas de negocio | `06_evaluacion_metricas_negocio` | ⏳ |
 | Pipeline, endpoint y monitoreo en Azure ML | `azure/` | ⏳ Diseñado |
