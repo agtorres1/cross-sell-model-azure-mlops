@@ -55,10 +55,12 @@ mes:  1    2    3    4    5    6  |  7  |  8    9
 
 | Etapa | Notebook | Estado |
 |---|---|---|
-| EDA y definición del universo | `01_eda_y_definicion_universo` | ✅ |
-| Construcción de la ABT | `02_construccion_abt` | ✅ |
-| Entrenamiento de modelos | `03_entrenamiento_modelos` | 🟡 En curso |
-| Evaluación con métricas de negocio | `04_evaluacion_metricas_negocio` | ⏳ |
+| Universo y target | `01_universo_y_target` | ✅ |
+| Limpieza: nulos y outliers | `02_limpieza` | ✅ |
+| Construcción de la ABT | `03_abt` | ✅ |
+| Reducción de dimensionalidad | `04_seleccion_variables` | 🟡 En curso |
+| Entrenamiento de modelos | `05_entrenamiento_modelos` | ⏳ |
+| Evaluación con métricas de negocio | `06_evaluacion_metricas_negocio` | ⏳ |
 | Pipeline, endpoint y monitoreo en Azure ML | `azure/` | ⏳ Diseñado |
 
 Los resultados (AUC, KS, lift del primer decil) se publican acá al cerrar el modelado.
