@@ -7,7 +7,7 @@ Modelo supervisado que predice qué clientes bancarios tienen mayor probabilidad
 ![LightGBM](https://img.shields.io/badge/LightGBM-2E8B57)
 ![Azure ML](https://img.shields.io/badge/Azure_ML-SDK_v2-0078D4?logo=microsoftazure&logoColor=white)
 ![MLflow](https://img.shields.io/badge/MLflow-0194E2?logo=mlflow&logoColor=white)
-![Estado](https://img.shields.io/badge/estado-modelado_en_curso-yellow)
+![Estado](https://img.shields.io/badge/estado-modelado_completo-brightgreen)
 
 ---
 
@@ -59,11 +59,19 @@ mes:  1    2    3    4    5    6  |  7  |  8    9
 | Limpieza: nulos y outliers | `02_limpieza` | ✅ |
 | Construcción de la ABT | `03_abt` | ✅ |
 | Selección de variables | `04_seleccion` | ✅ |
-| Entrenamiento de modelos | `05_entrenamiento_modelos` | ⏳ |
-| Evaluación con métricas de negocio | `06_evaluacion_metricas_negocio` | ⏳ |
+| Modelado, evaluación y corte de campaña | `05_modelado` | ✅ |
 | Pipeline, endpoint y monitoreo en Azure ML | `azure/` | ⏳ Diseñado |
 
-Los resultados (AUC, KS, lift del primer decil) se publican acá al cerrar el modelado.
+### Resultados (test, 4.639 clientes nunca vistos)
+
+| Modelo | AUC | KS | Lift 10 % | Lift 20 % |
+|---|---|---|---|---|
+| LightGBM (100 árboles) | 0,840 | 0,506 | 2,62 | 2,37 |
+
+- En el top 10 % de puntaje contrata el **77 %** de los clientes, contra 29 % al azar.
+- Con costo por llamada de $10.000 y ganancia por venta de $100.000, el corte óptimo es el **top 70 %**: maximiza la ganancia y evita 1.391 llamadas que no se pagan.
+
+Detalle en [`docs/metricas.md`](docs/metricas.md) y justificación de cada elección en [`docs/decisiones.md`](docs/decisiones.md).
 
 ---
 
