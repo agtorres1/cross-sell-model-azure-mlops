@@ -20,3 +20,8 @@ CLAUDE.md
 __pycache__/
 *.pyc
 .env
+
+# Artefactos generados por src/train.py y src/score.py
+models/*.joblib
+models/*.json
+data/scores/
